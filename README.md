@@ -59,6 +59,8 @@ However, I am actively seeking guidance and mentorship.
 My ultimate goal is to become good enough at systems programming to work at an incredible company like Fly.io (or similar environments where this kind of low-level, high-performance engineering thrives). If you are a senior engineer, a Rustacean, or someone who has walked this path before:
 
 I would gladly welcome code reviews, architectural advice, or pointers on where my logic can improve.
+Let's Connect: I am always looking to surround myself with builders and people who share this passion. Please feel free to reach out and connect with me on LinkedIn. Just mention you saw this repo!
+
 
 Feel free to open an Issue just to leave feedback or point me toward resources that will help me fly.
 
