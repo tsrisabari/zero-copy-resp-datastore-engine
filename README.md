@@ -1,50 +1,56 @@
 Zero-Copy RESP Datastore Engine
-
 An in-memory datastore built entirely from scratch in asynchronous Rust. This engine implements RESP (the REdis Serialization Protocol) and is designed to safely handle thousands of concurrent connections.
 
 This project is not just a datastore; it is the documentation of my journey deep into systems programming and Rust.
 
 Running It Locally
-
 If you want to pull this down and see where the engine is currently at, here is how you can run it on your system:
 
-# Clone the repository
-git clone https://github.com/yourusername/zero-copy-resp-engine.git
+#Clone the repository
+git clone https://github.com/tsrisabari/zero-copy-resp-datastore-engine.git
 
-# Navigate into the project
-cd zero-copy-resp-engine
+#Navigate into the project
+cd zero-copy-resp-datastore-engine
 
-# Build and run the engine
+#Build and run the engine
 cargo run
-
 
 (Note: As the networking layer is still actively being connected, you might need to use a tool like redis-cli or netcat on the configured port once the TCP listener is fully bound.)
 
-The Journey So Far
+Core Architecture
+This datastore is engineered for high-throughput and minimal memory overhead. Here are the core architectural decisions driving the engine:
 
-This project is currently in active development. The foundational months focused heavily on ownership and borrowing concepts. My background in C made it a little easier, but the Rust compiler sure lives up to its name. I still have a long way to go, but this has twisted my brain in ways I could have never imagined.
+Lock-Sharded Memory Vault: Instead of a single global lock, the database uses 64 independent HashMap shards. Keys are routed using Modulo Hashing. This means user:100:name and user:100:age might live in completely different physical shards, allowing parallel execution without thread starvation.
 
-Learning Rust is different—it feels more like learning a new skill that is both as hard as a mountain, but as unique as a mountain.
+Highly Concurrent RwLock: By utilizing Read-Write Locks instead of standard Mutexes, thousands of users can simultaneously read data from the same shard, while write locks are isolated only to the specific shard being modified.
 
-Technical Evolution
+Zero-Copy Network Boundary: Data duplication is avoided entirely. By using bytes::Bytes::freeze(), the engine stores lightweight pointers to memory. When a client requests data, the Encoder directly reads these pointers to construct the TCP payload, completely eliminating heap allocation overhead.
 
-I have built the RESP framework and am able to parse data and connect it to my frames. Right now, my core focus is on building an incredibly strong datastore engine first, before I fully dive into connecting ports and managing the wider network architecture.
+Lazy Deletion Engine: Time-To-Live (TTL) expiration is handled lazily. Instead of running a heavy background thread to constantly clear memory, the engine checks the Instant metadata at the exact moment of a GET request, keeping CPU cycles focused on live traffic.
 
-As I build the program, there is a constant need to change the code and evolve my understanding of how things work under the hood:
+Asynchronous Write-Ahead Log (WAL): Disk persistence is achieved through a custom AOF (Append-Only File) engine using tokio::fs::OpenOptions. The disk I/O phase is deliberately executed after the memory RwLock is dropped to prevent the physical hard drive from blocking RAM access.
 
-Memory & Bytes: I am experimenting heavily with how raw bytes perform, specifically analyzing the difference between .to_vec() and Bytes::freeze(), and determining which is superior based on specific use cases to achieve true zero-copy.
+The Engineering Devlog
+This project is my primary learning ground. Here is the documentation of how my mental models are evolving as I build:
 
-The Network Bridge: TCP doesn't inherently understand my code, so I am using the tokio::codec crate (Encoder/Decoder). As data is received in raw bytes over the network, it passes through my RESP code to be parsed and used at the exact needed time.
+Week 1 (Current): Memory Vaults, Zero-Copy, & Tokio Integrations
+
+The Misunderstanding: Coming from a traditional mindset, I initially thought related data (like a user's name and age) needed to be stored together in a JSON-like blob. I realized that Key-Value namespacing (routing user:100:name and user:100:age independently) is vastly superior for write performance because it avoids parsing and rewriting entire objects.
+
+The Breakthrough: Understanding Bytes::freeze over .clone(). I realized I am not actually moving strings around; I am moving 8-byte pointers.
+
+The Struggle: Connecting my custom RespFrame enums to Tokio's network stream using the Encoder/Decoder traits was a massive conceptual hurdle, as was figuring out array cursor read-ahead logic. Furthermore, shifting from C-style error handling (trying an action and reacting to a failure) to Rust's declarative OpenOptions (defining the rules of the file upfront before accessing it) twisted my brain, but ultimately proved much safer.
 
 The Rust Roadmap
-
 Here is my clean plan for where this engine is going in the upcoming months:
 
 [x] Build the core RESP serialization/deserialization framework.
 
-[ ] Concurrency Upgrade: Transition the central state from Arc<Mutex> to RwLock to handle highly concurrent reads more efficiently.
+[x] Concurrency Upgrade: Transition the central state from Arc<Mutex> to a Lock-Sharded RwLock to handle highly concurrent reads.
 
-[ ] Command Implementation: Build out the core datastore commands (GET, SET, etc.) to process the parsed frames.
+[x] Command Implementation: Build out the core datastore commands (GET, SET with EXPIRE) to process the parsed frames.
+
+[ ] AOF Binary Upgrade: Transition the Write-Ahead Log from human-readable text to raw binary RESP bytes by feeding file I/O directly through the network Decoder/Encoder to prevent allocation overhead during boot recovery.
 
 [ ] Networking & Ports: Fully connect the TCP listeners and manage asynchronous connection dropping/handling.
 
@@ -58,7 +64,8 @@ However, I am actively seeking guidance and mentorship.
 
 My ultimate goal is to become good enough at systems programming to work at an incredible company like Fly.io (or similar environments where this kind of low-level, high-performance engineering thrives). If you are a senior engineer, a Rustacean, or someone who has walked this path before:
 
-I would gladly welcome code reviews, architectural advice, or pointers on where my logic can improve. Let's Connect: I am always looking to surround myself with builders and people who share this passion. Please feel free to reach out and connect with me on [LinkedIn](https://www.linkedin.com/in/sri-sabari-t-62b989427). Just mention you saw this repo!
+I would gladly welcome code reviews, architectural advice, or pointers on where my logic can improve. 
+Let's Connect: I am always looking to surround myself with builders and people who share this passion. Please feel free to reach out and connect with me on [LinkedIn](https://www.linkedin.com/in/sri-sabari-t-62b989427). Just mention you saw this repo!
 
 Feel free to open an Issue just to leave feedback or point me toward resources that will help me fly.
 
