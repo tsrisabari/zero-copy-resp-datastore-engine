@@ -30,7 +30,7 @@ impl Command {
             return Err("ERR empty command".to_string());
         }
 
-        let verb = let verb = extract_string(&array[0])?.to_uppercase();
+       let verb = extract_string(&array[0])?.to_uppercase();
 
         match verb.as_str() {
             "GET" => {
