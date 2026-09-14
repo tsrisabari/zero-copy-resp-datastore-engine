@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 use bytes::{Buf, Bytes, BytesMut};
-use std::io;
 use std::io::Cursor;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -14,14 +13,12 @@ pub enum RespFrame {
     Null,
 }
 
-
 #[derive(Debug)]
 pub enum RespError {
     Incomplete,
     InvalidProtocol(String),
     Io(std::io::Error),
 }
-
 
 impl std::fmt::Display for RespError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -33,16 +30,13 @@ impl std::fmt::Display for RespError {
     }
 }
 
-
 impl std::error::Error for RespError {}
-
 
 impl From<std::io::Error> for RespError {
     fn from(err: std::io::Error) -> RespError {
         RespError::Io(err)
     }
 }
-
 
 fn parse_frame(src: &mut BytesMut) -> Result<Option<RespFrame>, RespError> {
     if src.is_empty() {
@@ -58,7 +52,7 @@ fn parse_frame(src: &mut BytesMut) -> Result<Option<RespFrame>, RespError> {
                 let text_bytes = &chunk[..crlf_pos];
                 let text = String::from_utf8_lossy(text_bytes).into_owned();
 
-                cursor.advance(crlf_pos + 2); 
+                cursor.advance(crlf_pos + 2);
                 let total_bytes_moved = cursor.position() as usize;
                 src.advance(total_bytes_moved);
 
@@ -77,7 +71,6 @@ fn parse_frame(src: &mut BytesMut) -> Result<Option<RespFrame>, RespError> {
                 let number: i64 = match num_str.parse() {
                     Ok(n) => n,
                     Err(_) => {
-                        
                         return Err(RespError::InvalidProtocol("Invalid Integer".to_string()));
                     }
                 };
@@ -108,7 +101,7 @@ fn parse_frame(src: &mut BytesMut) -> Result<Option<RespFrame>, RespError> {
 
                 for _ in 0..array_len {
                     if !cursor.has_remaining() {
-                         return Ok(None);
+                        return Ok(None);
                     }
 
                     match cursor.get_u8() {
@@ -119,7 +112,9 @@ fn parse_frame(src: &mut BytesMut) -> Result<Option<RespFrame>, RespError> {
                                 let str_len: usize = match len_str.parse() {
                                     Ok(num) => num,
                                     Err(_) => {
-                                        return Err(RespError::InvalidProtocol("Invalid String Len".to_string()));
+                                        return Err(RespError::InvalidProtocol(
+                                            "Invalid String Len".to_string(),
+                                        ));
                                     }
                                 };
 
@@ -134,7 +129,9 @@ fn parse_frame(src: &mut BytesMut) -> Result<Option<RespFrame>, RespError> {
                             }
                         }
                         _ => {
-                            return Err(RespError::InvalidProtocol("Expected BulkString".to_string()));
+                            return Err(RespError::InvalidProtocol(
+                                "Expected BulkString".to_string(),
+                            ));
                         }
                     };
                 }
@@ -164,13 +161,13 @@ fn parse_frame(src: &mut BytesMut) -> Result<Option<RespFrame>, RespError> {
             }
         }
 
-        _ => Err(RespError::InvalidProtocol("Invalid Protocol".to_string()))
+        _ => Err(RespError::InvalidProtocol("Invalid Protocol".to_string())),
     }
 }
 
 fn find_crlf(buf: &[u8]) -> Option<usize> {
     (0..buf.len().saturating_sub(1)).find(|&i| buf[i] == b'\r' && buf[i + 1] == b'\n')
-}  
+}
 
 impl RespFrame {
     pub fn encode(&self, buf: &mut BytesMut) {
@@ -215,9 +212,8 @@ impl RespFrame {
 #[derive(Debug)]
 pub struct RespCodec;
 
-
 impl Encoder<RespFrame> for RespCodec {
-    type Error = RespError; 
+    type Error = RespError;
 
     fn encode(&mut self, item: RespFrame, dst: &mut BytesMut) -> Result<(), Self::Error> {
         item.encode(dst);
@@ -226,7 +222,7 @@ impl Encoder<RespFrame> for RespCodec {
 }
 
 impl Decoder for RespCodec {
-    type Error = RespError; 
+    type Error = RespError;
     type Item = RespFrame;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {

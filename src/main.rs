@@ -10,6 +10,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -49,15 +50,17 @@ impl ShardedDb {
         (hash_value as usize) % NUM_SHARDS
     }
 }
-async fn write_to_aof(command_bytes: &BytesMut) -> Result<(), std::io::Error> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("database_aof")
-        .await?;
-    file.write_all(command_bytes).await?;
-    Ok(())
+#[derive(Debug, Clone, Copy)]
+pub enum PersistenceMode {
+    Always,
+    EverySec,
 }
+
+#[derive(Debug)]
+pub enum DbMessage {
+    WriteBytes(bytes::Bytes),
+}
+
 
 async fn replay_aof(db: Arc<ShardedDb>) {
     let file_result = File::open("database_aof").await;
@@ -77,15 +80,17 @@ async fn replay_aof(db: Arc<ShardedDb>) {
                 loop {
                     match codec.decode(&mut buffer) {
                         Ok(Some(frame)) => {
-                             if let Ok(Command::Set { key, value, time }) = Command::from_frame(frame) {
-                                 let expiration_time = time.map(|t| Instant::now() + Duration::from_secs(t));
+                            if let Ok(Command::Set { key, value, time }) =
+                                Command::from_frame(frame)
+                            {
+                                let expiration_time =
+                                    time.map(|t| Instant::now() + Duration::from_secs(t));
                                 let room = db.get_shard_index(&key);
-                              {
-                                   let mut pen = db.shards[room].write().unwrap();
-                                   pen.insert(key, (Arc::new(value.clone()), expiration_time));
-                              }
-                          };
-
+                                {
+                                    let mut pen = db.shards[room].write().unwrap();
+                                    pen.insert(key, (Arc::new(value.clone()), expiration_time));
+                                }
+                            };
                         }
                         Ok(None) => break,
                         Err(e) => {
@@ -102,7 +107,54 @@ async fn replay_aof(db: Arc<ShardedDb>) {
     }
 }
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut persistence = PersistenceMode::EverySec;
+    let (tx, mut rx) = mpsc::channel::<DbMessage>(1000);
+
+    if args.contains(&"--appendfsync=always".to_string()) {
+        persistence = PersistenceMode::Always;
+        println!("WARNING: Persistence mode set to ALWAYS. Expect severe performance degradation.");
+    } else {
+        println!("Persistence mode set to EVERYSEC.");
+    }
+
+    tokio::spawn(async move {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("database_aof")
+            .await
+            .expect("Fatal Error: Background worker failed to open AOF file.");
+
+        let mut flush_interval = tokio::time::interval(Duration::from_secs(1));
+
+        loop {
+            tokio::select! {
+                Some(msg) = rx.recv() => {
+                    let DbMessage::WriteBytes(payload) = msg;
+                        if let Err(e) = file.write_all(&payload).await {
+                            eprintln!("Failed to write data in the OS buffer: {:?}", e);
+                        }
+
+
+                        if let PersistenceMode::Always = persistence && let Err(e) = file.sync_data().await {
+                                eprintln!("CRITICAL: physical disk sync failed during ALWAYS mode: {}", e);
+                            }
+                        
+                    
+                }
+                _ = flush_interval.tick() => {
+
+                    if let PersistenceMode::EverySec = persistence && let Err(e) = file.sync_data().await {
+                            eprintln!("CRITICAL: physical disk sync failed: {}", e);
+                        }
+                    
+                }
+            }
+        }
+    });
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
     println!("Data store engine is running on port 6379...");
 
@@ -110,6 +162,7 @@ async fn main() -> std::io::Result<()> {
     replay_aof(db.clone()).await;
 
     let db_del_clone = Arc::clone(&db);
+
     tokio::spawn(async move {
         let mut current_shard_index = 0;
         loop {
@@ -120,10 +173,11 @@ async fn main() -> std::io::Result<()> {
                 {
                     let mut pen = db_del_clone.shards[target_shards].write().unwrap();
                     for (k, v) in pen.iter() {
-                       if let Some(time) = v.1
-                     && time < Instant::now() {
-                        keys_to_delete.push(k.clone());
-                    }
+                        if let Some(time) = v.1
+                            && time < Instant::now()
+                        {
+                            keys_to_delete.push(k.clone());
+                        }
                     }
                     for k in keys_to_delete {
                         pen.remove(&k);
@@ -139,6 +193,7 @@ async fn main() -> std::io::Result<()> {
         println!("New connection established from: {}", addr);
 
         let db_clone = Arc::clone(&db);
+        let tx_clone = tx.clone();
 
         tokio::spawn(async move {
             let mut framed = Framed::new(socket, RespCodec);
@@ -146,9 +201,10 @@ async fn main() -> std::io::Result<()> {
             while let Some(result) = framed.next().await {
                 match result {
                     Ok(frame) => {
-                     let response =  match Command::from_frame(frame) {
+                        let response = match Command::from_frame(frame) {
                             Ok(Command::Set { key, value, time }) => {
-                               let expiration_time = time.map(|t| Instant::now() + Duration::from_secs(t));
+                                let expiration_time =
+                                    time.map(|t| Instant::now() + Duration::from_secs(t));
                                 let mut buffer = BytesMut::new();
                                 let mut aof_array = vec![
                                     RespFrame::BulkString(bytes::Bytes::from("SET")),
@@ -166,6 +222,7 @@ async fn main() -> std::io::Result<()> {
                                 let encoder_value = RespFrame::Array(aof_array);
                                 let mut codec = RespCodec;
                                 codec.encode(encoder_value, &mut buffer).unwrap();
+                                let msg = DbMessage::WriteBytes(buffer.freeze());
                                 let room = db_clone.get_shard_index(&key);
 
                                 {
@@ -173,7 +230,9 @@ async fn main() -> std::io::Result<()> {
                                     pen.insert(key, (Arc::new(value.clone()), expiration_time));
                                 }
 
-                                write_to_aof(&buffer).await.unwrap();
+                                if let Err(e) = tx_clone.send(msg).await {
+                                    println!("Failed to send to background worker: {}", e);
+                                }
                                 RespFrame::SimpleString("OK".to_string())
                             }
                             Ok(Command::Get { key }) => {
@@ -183,17 +242,17 @@ async fn main() -> std::io::Result<()> {
 
                                 {
                                     let finder = db_clone.shards[room].read().unwrap();
-                                   if let Some(data) = finder.get(&key) {
-                                  if let Some(time_limit) = data.1 {
-                                      if Instant::now() > time_limit {
-                                       is_expired = true;
-                                           } else {
-                                         return_frame = (*data.0).clone();
-                                             }
-                                          } else {
-                                          return_frame = (*data.0).clone();
-                                         }
+                                    if let Some(data) = finder.get(&key) {
+                                        if let Some(time_limit) = data.1 {
+                                            if Instant::now() > time_limit {
+                                                is_expired = true;
+                                            } else {
+                                                return_frame = (*data.0).clone();
+                                            }
+                                        } else {
+                                            return_frame = (*data.0).clone();
                                         }
+                                    }
                                 }
                                 if is_expired {
                                     let mut hunter = db_clone.shards[room].write().unwrap();
