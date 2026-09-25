@@ -59,6 +59,12 @@ Week 4: The 1 Million RPS Barrier & Observability
 The Terminal Chokehold: While load-testing, the Tokio reactor completely stalled. The bottleneck wasn't my database; it was the stdout terminal logger. Writing INFO logs to the screen was consuming all CPU cycles. Shifting the tracing subscriber to WARN instantly unlocked the engine's true capacity, pushing it past 1,000,000 requests per second.
 Fuzzing & Flamegraphs: I hardened the RESP parser against single-token command panics (like PING and CONFIG) using proptest property-based fuzzing. To mathematically prove my lock sharding worked, I instrumented the runtime with tracing-flame, generating an SVG flamegraph that confirmed zero vertical lock-wait towers during a 100k pipelined load.
 
+Below is the execution profile under a 100,000 pipelined request workload:
+
+[![Flamegraph Profile](perf-profile.svg)](perf-profile.svg)
+
+> **Note:** Click the image to open the raw SVG in your browser for interactive frame inspection and zooming.
+
 The Road Ahead
 This engine is feature-complete for its original scope, but the journey into low-level infrastructure is just starting.
 
