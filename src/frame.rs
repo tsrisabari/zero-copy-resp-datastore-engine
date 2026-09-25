@@ -229,3 +229,25 @@ impl Decoder for RespCodec {
         parse_frame(src)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+    use proptest::prelude::*;
+    use tokio_util::codec::Decoder;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10000))]
+
+        #[test]
+        fn fuzz_resp_parser(data in proptest::collection::vec(any::<u8>(), 0..2048)) {
+
+            let mut codec = RespCodec;
+
+            let mut buffer = BytesMut::from(&data[..]);
+
+            let _ = codec.decode(&mut buffer);
+        }
+    }
+}

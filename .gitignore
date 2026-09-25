@@ -1,3 +1,6 @@
 /target
 Cargo.lock
 database_aof
+tracing.folded
+database_aof
+temp_aof

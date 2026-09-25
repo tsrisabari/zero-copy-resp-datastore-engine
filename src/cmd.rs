@@ -1,21 +1,23 @@
 use crate::frame::RespFrame;
-
+use bytes::Bytes;
 #[derive(Debug)]
 pub enum Command {
     Get {
-        key: String,
+        key: Bytes,
     },
     Set {
-        key: String,
+        key: Bytes,
         value: RespFrame,
         time: Option<u64>,
     },
     Del {
-        key: String,
+        key: Bytes,
     },
     Exist {
-        key: String,
+        key: Bytes,
     },
+    Ping,
+    Config,
     Unknown,
 }
 
@@ -33,18 +35,21 @@ impl Command {
         let verb = extract_string(&array[0])?.to_uppercase();
 
         match verb.as_str() {
+            "PING" => Ok(Command::Ping),
+            "COMMAND" | "CONFIG" | "INFO" => Ok(Command::Config),
             "GET" => {
                 if array.len() != 2 {
                     return Err("ERR wrong number of arguments for 'get' command".to_string());
                 }
+                let key = extract_key(&array[1])?;
 
-                let key = extract_string(&array[1])?;
                 Ok(Command::Get { key })
             }
             "SET" => {
                 if array.len() != 3 && array.len() != 5 {
                     return Err("ERR wrong number of arguments for 'set' command".to_string());
                 }
+                let key = extract_key(&array[1])?;
                 if array.len() == 5 {
                     let string = extract_string(&array[3])?;
                     match string.to_uppercase().as_str() {
@@ -54,7 +59,7 @@ impl Command {
                                 Ok(n) => n,
                                 Err(_) => return Err("Invalid integer for EX".to_string()),
                             };
-                            let key = extract_string(&array[1])?;
+
                             let value = array[2].clone();
                             return Ok(Command::Set {
                                 key,
@@ -65,7 +70,7 @@ impl Command {
                         _ => return Ok(Command::Unknown),
                     }
                 }
-                let key = extract_string(&array[1])?;
+
                 let value = array[2].clone();
                 Ok(Command::Set {
                     key,
@@ -78,7 +83,7 @@ impl Command {
                 if array.len() != 2 {
                     return Err("ERR wrong number of arguments for 'del' command".to_string());
                 }
-                let key = extract_string(&array[1])?;
+                let key = extract_key(&array[1])?;
                 Ok(Command::Del { key })
             }
 
@@ -86,7 +91,7 @@ impl Command {
                 if array.len() != 2 {
                     return Err("ERR wrong number of arguments for 'exist' command".to_string());
                 }
-                let key = extract_string(&array[1])?;
+                let key = extract_key(&array[1])?;
                 Ok(Command::Exist { key })
             }
             _ => Ok(Command::Unknown),
@@ -99,5 +104,13 @@ fn extract_string(frame: &RespFrame) -> Result<String, String> {
         RespFrame::BulkString(bytes) => Ok(String::from_utf8_lossy(bytes).into_owned()),
         RespFrame::SimpleString(s) => Ok(s.clone()),
         _ => Err("ERR expected string argument".to_string()),
+    }
+}
+
+fn extract_key(frame: &RespFrame) -> Result<Bytes, String> {
+    match frame {
+        RespFrame::BulkString(b) => Ok(b.clone()),
+
+        _ => Err("The key must be a BulkString".into()),
     }
 }
