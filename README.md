@@ -10,19 +10,19 @@ Running the Engine & Benchmarks
 Clone the repository and boot the server in release mode (compiler optimizations are mandatory for these metrics):
 
 
-'''bash
+```bash
 git clone https://github.com/tsrisabari/zero-copy-resp-datastore-engine.git
 cd zero-copy-resp-datastore-engine
 cargo run --release
-'''
+```
 
 To verify the 1 Million RPS throughput:
 
 In a separate terminal, use standard redis-benchmark to hit the server with 100 concurrent connections, pipelining 100 requests per TCP packet to bypass OS wakeups:
 
-'''bash
+```bash
 redis-benchmark -p 6379 -t set,get -n 500000 -c 100 -r 1000000 -P 100 -q
-'''
+```
 
 Core Architecture & Mechanical Sympathy
 
