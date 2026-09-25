@@ -65,4 +65,4 @@ This engine is feature-complete for its original scope, but the journey into low
 I built this to prove I can manage memory safely, understand asynchronous state engines, and write idiomatic Rust that respects underlying hardware constraints. I am actively seeking remote B2B contracting roles or systems engineering positions at infrastructure companies (such as Turso, Qdrant, or similar database/edge environments) where high-performance, mechanical sympathy is required.
 
 If you are a senior systems engineer, a Rustacean, or a team looking for a disciplined low-level developer:
-Let's connect on LinkedIn[https://www.linkedin.com/in/sri-sabari-t-62b989427]. Just mention you saw this repository.
+Let's connect on [![LinkedIn](https://shields.io)](https://www.linkedin.com/in/sri-sabari-t-62b989427). Just mention you saw this repository.
