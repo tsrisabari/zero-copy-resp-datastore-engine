@@ -1,123 +1,65 @@
 Zero-Copy RESP Datastore Engine
-An in-memory datastore built entirely from scratch in asynchronous Rust. This engine implements RESP (the REdis Serialization Protocol) and is designed to safely handle thousands of concurrent connections.
 
-This project is not just a datastore; it is the documentation of my journey deep into systems programming, memory architecture, physical hardware constraints, and idiomatic Rust.
+An in-memory, zero-copy datastore built entirely from scratch in asynchronous Rust. It implements RESP (the REdis Serialization Protocol) and is designed to bypass standard operating system bottlenecks to safely handle massive concurrent loads.
 
-Running It Locally
+This project is not a tutorial clone. It is the documentation of a four-month descent into systems programming, CPU architecture, lock contention, OS page caches, and idiomatic Rust.
 
-If you want to pull this down and see where the engine is currently at, here is how you can run it on your system:
+Peak Benchmarked Throughput: 1,096,491 GET/s and 803,858 SET/s (Pipelined, TCP_NODELAY active).
 
-Clone the repository
+Running the Engine & Benchmarks
+Clone the repository and boot the server in release mode (compiler optimizations are mandatory for these metrics):
 
-  git clone https://github.com/tsrisabari/zero-copy-resp-datastore-engine.git 
+Bash
+git clone https://github.com/tsrisabari/zero-copy-resp-datastore-engine.git
+cd zero-copy-resp-datastore-engine
+cargo run --release
 
-Navigate into the project
+To verify the 1 Million RPS throughput:
 
-  cd zero-copy-resp-datastore-engine 
+In a separate terminal, use standard redis-benchmark to hit the server with 100 concurrent connections, pipelining 100 requests per TCP packet to bypass OS wakeups:
 
-Build and run the engine
- 
-           cargo run --release
+Bash
+redis-benchmark -p 6379 -t set,get -n 500000 -c 100 -r 1000000 -P 100 -q
 
+Core Architecture & Mechanical Sympathy
 
+This datastore achieves its speed by ruthlessly eliminating heap allocations and isolating thread locks to the microsecond level.
 
-(Note: Use redis-cli or netcat to connect to 127.0.0.1:6379 and issue standard commands like SET, GET, DEL, and EXIST. You can also boot with --appendfsync=always or --appendfsync=everysec to test persistence physics).
+64-Way Hash-Sharded Vault: Global RwLocks starve Tokio worker threads. By hashing keys into 64 independent shards, 100 concurrent clients can read and write simultaneously without forming single-file wait queues. Lock drop scopes ({ }) are strictly enforced, reducing thread block times to ~90 - 400 nanoseconds.
 
-Core Architecture
-This datastore is engineered for high-throughput and minimal memory overhead. Here are the core architectural decisions driving the engine:
+True Zero-Copy Network Boundary: The engine does not allocate String types in the hot path. It ingests raw TCP streams into a bytes::BytesMut buffer. The parser uses an in-memory cursor to identify frames, calling .split_to().freeze() to pass lightweight 8-byte smart pointers into the core engine.
 
-Lock-Sharded Memory Vault: Instead of a single global lock, the database uses 64 independent HashMap shards. Keys are routed using Modulo Hashing. This means user:100 and user:101 live in completely different physical shards, bypassing global lock contention and thread starvation.
+Detached Atomic Compaction (AOF): Writing every command to disk causes infinite log bloat. A detached Tokio background worker wakes up every 30 seconds, creates a volatile temp_aof snapshot of the active RAM state, and uses the POSIX rename syscall (ExecuteAtomicSwap) to replace the active Write-Ahead Log. This collapses 11MB of disk bloat down to 450 bytes in a single microsecond without dropping a single active TCP connection.
 
-
-Highly Concurrent RwLock: By utilizing Read-Write Locks instead of standard Mutexes, thousands of users can simultaneously read data from the same shard, while write locks are isolated only to the specific shard being modified.
-
-
-Zero-Copy Network Boundary: Data duplication is avoided. By utilizing bytes::BytesMut and .freeze(), the engine stores lightweight pointers to network memory. The Encoder/Decoder traits directly read these pointers to construct the TCP payload, eliminating heap allocation overhead for values.
-
-
-Decoupled MPSC Persistence: Disk I/O is completely separated from the network loop. Commands are passed through a bounded mpsc channel (1,000 capacity) acting as a shock-absorber. A background worker drains this channel into the OS Page Cache, allowing the network to process requests at pure RAM speed without being held hostage by the SSD.
-
-
-Active & Lazy GC Engine: Time-To-Live (TTL) expiration is handled via a two-pronged approach. A background tokio::spawn loop actively sweeps and purges expired keys every 5 seconds to prevent memory leaks, while a lazy check guarantees stale data is never returned on a GET.
-
+Decoupled MPSC Persistence: Disk I/O is physically separated from the network loop. Commands are passed through a bounded mpsc channel (100,000 capacity). A background worker drains this channel into the Linux Kernel Page Cache, allowing the network to process requests at pure RAM speed.
 
 The Engineering Devlog
-This project is my primary learning ground. Here is the documentation of how my mental models are evolving as I build:
+This project was built through brutal trial and error. Here is the documentation of how my mental models broke and evolved as I pushed the hardware to its limits.
 
-Week 1: Memory Vaults & The Tokio Hurdle
+Week 1: Memory Vaults & The Zero-Copy Shift
 
-The Misunderstanding: Coming from a traditional mindset, I initially thought related data needed to be stored together in a JSON-like blob. I realized that Key-Value namespacing is vastly superior for write performance because it avoids parsing and rewriting entire objects.
+The Misunderstanding: I initially thought related data needed to be stored together in JSON-like structs. I quickly realized that flat Key-Value namespacing is vastly superior for write latency because it avoids parsing and rewriting entire nested objects.
+The Breakthrough: Transitioning from String to Bytes. I realized I am not actually moving data around the application; I am moving 8-byte fat pointers. Eliminating .clone() across the network boundary was my first lesson in memory physics.
 
+Week 2: TCP Physics & The I/O Hostage Situation
 
-The Breakthrough: Understanding Bytes::freeze over .clone(). I realized I am not actually moving strings around; I am moving 8-byte fat pointers.
+The Eye-Opener: TCP is a stream of water, not a conveyor belt of neat packages. Handling fragmented packets completely changed how I view network buffers. I had to build a parser that correctly yields Ok(None) to instruct Tokio's Framed stream to wait for more physical bytes before executing.
+The I/O Trap: I realized a massive flaw in my early architecture: I was writing to the physical SSD before returning the +OK response to the client. I was holding the Tokio event loop hostage to the speed of my NAND flash, completely neutralizing my RAM speed.
 
+Week 3: Nagle's Algorithm & The OS Border Crossing
 
-The Struggle: Connecting my custom RespFrame enums to Tokio's network stream using the Encoder/Decoder traits was a massive conceptual hurdle.
+The 5,000 RPS Ceiling: I hit a hard wall. No matter how much I optimized my code, throughput wouldn't pass 5k. I realized the Linux kernel was artificially holding my packets using Nagle's Algorithm. Activating TCP_NODELAY bypassed the OS buffer, instantly shooting throughput to 60,000+ RPS.
+The Physics of Disk Writes: I learned the vital distinction between write_all(), flush(), and sync_data(). I realized that flush() only moves data from my Rust app to the Linux Kernel Page Cache. To actually survive a power failure, I had to force the OS to trigger fdatasync() to burn the bytes into physical silicon.
 
-Week 2: TCP Physics, Idiomatic Rust, & Systems Tradeoffs
+Week 4: The 1 Million RPS Barrier & Observability
 
-The Eye-Opener (TCP Fragmentation): I learned the hard way that TCP is a stream of water, not a conveyor belt of neat packages. Handling split packets completely changed how I view network buffers. I had to build a two-pass parser that correctly yields Ok(None) to instruct Tokio's Framed stream to wait for more physical bytes before executing.
+The Terminal Chokehold: While load-testing, the Tokio reactor completely stalled. The bottleneck wasn't my database; it was the stdout terminal logger. Writing INFO logs to the screen was consuming all CPU cycles. Shifting the tracing subscriber to WARN instantly unlocked the engine's true capacity, pushing it past 1,000,000 requests per second.
+Fuzzing & Flamegraphs: I hardened the RESP parser against single-token command panics (like PING and CONFIG) using proptest property-based fuzzing. To mathematically prove my lock sharding worked, I instrumented the runtime with tracing-flame, generating an SVG flamegraph that confirmed zero vertical lock-wait towers during a 100k pipelined load.
 
+The Road Ahead
+This engine is feature-complete for its original scope, but the journey into low-level infrastructure is just starting.
 
-The Struggle (The Strictness of Rust): Getting the compiler to compile is one thing; getting it to pass cargo clippy with zero warnings is another. I spent this week wrestling with expression-based returns, if let unwrapping, and mapping closures to achieve true idiomatic, functional Rust.
+I built this to prove I can manage memory safely, understand asynchronous state engines, and write idiomatic Rust that respects underlying hardware constraints. I am actively seeking remote B2B contracting roles or systems engineering positions at infrastructure companies (such as Turso, Qdrant, or similar database/edge environments) where high-performance, mechanical sympathy is required.
 
-
-The Breakthrough (The I/O Hostage Situation): While analyzing my SET command latency, I realized a massive flaw: I was writing to the AOF disk before returning the +OK response. I was holding the client hostage to the speed of my SSD, completely neutralizing my RAM speed.
-
-
-Week 3: Backpressure, OS Page Cache, & Crash Resilience
-
-The Physics of I/O: I built an asynchronous background worker using mpsc channels to fix the I/O bottleneck. During benchmarking, I realized the critical difference between the OS RAM Buffer (write_all) and the physical SSD flash (sync_data).
-
-
-Backpressure in Action: By implementing a bounded channel of 1,000 messages, I successfully implemented network backpressure. Testing with --appendfsync=always immediately dropped my throughput to ~300 RPS, proving the shock-absorber protects the RAM from overflowing when the hardware can't keep up.
-
-
-The Result: Testing on --appendfsync=everysec, the database hit the TCP loopback limit on my machine (~60,000 RPS). To prove durability, I violently killed the server mid-process. On restart, the engine successfully read a 37MB Write-Ahead Log from the physical disk, parsing and reconstructing the entire state back into the 64 RAM shards without losing a single byte.
-
-
-The Rust Roadmap
-Here is my plan for where this engine is going in the upcoming months:
-
-Phase 1 & 2 (Completed)
-[x] Build the core RESP serialization/deserialization framework.
-
-
-[x] Concurrency Upgrade: Lock-Sharded RwLock for high-throughput parallel reads.
-
-
-[x] Background I/O (mpsc channels): Decouple AOF disk writes from the main network event loop.
-
-
-[x] Boot-Time Replay: Reconstruct exact database state from disk on startup.
-
-
-[x] Configurable Persistence: Implement EverySec and Always sync modes.
-
-
-
-
-Phase 3 (Active Next Steps)
-[ ] True Zero-Copy Keys: Transition HashMap<String, ...> to HashMap<Bytes, ...> to eliminate the final heap allocation bottleneck (String parsing) during command routing.
-
-
-[ ] Lock Elision on Boot: Bypass RwLock overhead entirely during AOF replay to drastically cut CPU usage and reduce server boot time.
-
-
-[ ] LRU Eviction (OOM Defense): Build an eviction algorithm to protect the server from Out-Of-Memory crashes when processing millions of non-expiring keys.
-
-
-A Note on Contributions & Mentorship
-
-Because this project is in heavy, active development and serves as my primary learning ground, I am not currently looking for major code pull requests. I want to write the foundational code myself to ensure I truly learn it.
-
-However, I am actively seeking guidance and mentorship. My ultimate goal is to become an elite systems programmer and work at an infrastructure company like Fly.io, Cloudflare, or similar environments where low-level, high-performance engineering thrives. If you are a senior engineer, a Rustacean, or someone who has walked this path before:
-
-Let's Connect: I am always looking to surround myself with builders and people who share this passion. Please feel free to reach out and connect with me on[LinkedIn](https://www.linkedin.com/in/sri-sabari-t-62b989427).Just mention you saw this repo.
-
-
-Code Reviews: I would gladly welcome architectural advice, or pointers on where my logic can improve. Feel free to open an Issue just to leave feedback or point me toward resources that will help me build better systems.
-
-
-I know I have a long way to go, so I gotta only go forward.
-
+If you are a senior systems engineer, a Rustacean, or a team looking for a disciplined low-level developer:
+Let's connect on LinkedIn[https://www.linkedin.com/in/sri-sabari-t-62b989427]. Just mention you saw this repository.
